@@ -53,6 +53,35 @@ waiting_for_anon = set()
 chat_locked = False
 
 # ==============================
+# Антирейд
+# ==============================
+antiraid_enabled = False
+ANTIRAID_JOIN_LIMIT = 5      # максимум новых участников за окно
+ANTIRAID_JOIN_WINDOW = 10    # секунд
+recent_joins: list[float] = []
+
+# ==============================
+# Антилинк
+# ==============================
+antilink_enabled = False
+LINK_PATTERN = re.compile(
+    r"(https?://|www\.|t\.me/|@\w+\.\w+|"
+    r"(?<!\w)(?:telegram\.me|tg\.me|discord\.gg|bit\.ly|goo\.gl))",
+    re.IGNORECASE,
+)
+
+# ==============================
+# Настройки чата
+# ==============================
+settings: dict = {
+    "antispam": True,
+    "antilink": False,
+    "anticaps": False,
+    "antiraid": False,
+    "max_length": MAX_MESSAGE_LENGTH,
+}
+
+# ==============================
 # Запретные слова
 # ==============================
 BANNED_WORDS = [
@@ -61,72 +90,30 @@ BANNED_WORDS = [
 ]
 
 # ==============================
-# AntiRaid защита
+# ШУТКИ
 # ==============================
-antiraid_enabled = False
-antiraid_join_tracker: dict[int, list[float]] = defaultdict(list)  # user_id -> время заходов
-ANTIRAID_JOIN_LIMIT = 5  # максимум заходов за 10 минут от одного юзера
-ANTIRAID_WINDOW = 600  # 10 минут в секундах
+JOKES = [
+    "Почему программисты не смотрят в окно? Потому что там слишком много bagов.",
+    "Встречаются два байта. Один говорит: «У тебя биты не выровнены!» Второй: «Это не баг, это фича.»",
+    "Жена программиста отправила его в магазин: «Купи хлеб, и если будут яйца — возьми десяток». Он вернулся с 10 буханками хлеба.",
+    "— Как дела? — Null. — Что? — Не определено.",
+    "404: Шутка не найдена. Попробуй перезагрузить чат.",
+    "Оптимист говорит: стакан наполовину полон. Пессимист: наполовину пуст. Программист: стакан в два раза больше, чем нужно.",
+    "— Почему ты такой молчаливый? — Boolean. True or False. Третьего не дано.",
+    "Бог создал мир за 6 дней, потому что у него не было legacy code.",
+    "Баг — это не баг. Это недокументированная фича.",
+    "— Сколько программистов нужно, чтобы вкрутить лампочку? — Ни одного, это аппаратная проблема.",
+]
 
 # ==============================
-# AntiLink
-# ==============================
-antilink_enabled = False
-LINK_PATTERN = re.compile(r'(https?://|www\.)[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(/\S*)?')
-
-# ==============================
-# Настройки чата (сохраняются в БД)
-# ==============================
-def init_settings_db():
-    conn = sqlite3.connect("moderation.db")
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS chat_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def get_setting(key: str, default: str = "off") -> str:
-    conn = sqlite3.connect("moderation.db")
-    row = conn.execute("SELECT value FROM chat_settings WHERE key = ?", (key,)).fetchone()
-    conn.close()
-    return row[0] if row else default
-
-def set_setting(key: str, value: str):
-    conn = sqlite3.connect("moderation.db")
-    conn.execute("INSERT OR REPLACE INTO chat_settings (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
-
-# ==============================
-# Логирование действий бота
-# ==============================
-LOG_CHANNEL_ID = None  # можно задать ID канала для логов
-
-async def log_action(action: str, moderator: str, target: str, reason: str = "", details: str = ""):
-    """Отправляет лог в канал (если настроен)"""
-    if LOG_CHANNEL_ID:
-        log_text = f"📋 <b>{action}</b>\n👮 Модератор: {moderator}\n👤 Цель: {target}"
-        if reason:
-            log_text += f"\n📌 Причина: {reason}"
-        if details:
-            log_text += f"\n📝 Детали: {details}"
-        try:
-            await bot.send_message(LOG_CHANNEL_ID, log_text, parse_mode="HTML")
-        except Exception:
-            pass
-
-# ==============================
-# Система уровней
+# СИСТЕМА УРОВНЕЙ
 # ==============================
 EXP_PER_MESSAGE_MIN = 3
 EXP_PER_MESSAGE_MAX = 8
-EXP_COOLDOWN = 60  # секунд между начислением опыта
+EXP_COOLDOWN = 60
+DAILY_BONUS_MIN = 50
+DAILY_BONUS_MAX = 150
 exp_cooldown_tracker: dict[int, float] = {}
-DAILY_BONUS_EXP = 50  # ежедневный бонус
 
 LEVEL_NAMES = {
     0:  "🐣 Новичок",
@@ -146,13 +133,11 @@ def get_level_name(level: int) -> str:
     return LEVEL_NAMES.get(min(level, max(LEVEL_NAMES.keys())), LEVEL_NAMES[max(LEVEL_NAMES.keys())])
 
 def exp_for_level(level: int) -> int:
-    """Суммарный опыт для достижения уровня."""
     if level <= 0:
         return 0
     return int(100 * (level ** 1.5))
 
 def calculate_level(total_exp: int) -> tuple[int, int, int]:
-    """Возвращает (level, exp_в_текущем_уровне, нужно_до_следующего)."""
     level = 0
     while exp_for_level(level + 1) <= total_exp:
         level += 1
@@ -168,47 +153,12 @@ def make_progress_bar(current: int, total: int, length: int = 10) -> str:
     return "█" * filled + "░" * (length - filled)
 
 # ==============================
-# Ежедневный бонус (cooldown)
-# ==============================
-daily_bonus_tracker: dict[int, int] = {}  # user_id -> timestamp последнего бонуса
-DAILY_COOLDOWN = 86400  # 24 часа
-
-# ==============================
-# Активность за 7 дней (для топа)
-# ==============================
-user_activity: dict[int, list[int]] = defaultdict(list)  # user_id -> [timestamp сообщений]
-ACTIVITY_WINDOW = 7 * 86400  # 7 дней в секундах
-
-def add_activity(user_id: int):
-    """Добавляет активность пользователя"""
-    now = int(time.time())
-    user_activity[user_id].append(now)
-    # Очищаем старые записи
-    user_activity[user_id] = [t for t in user_activity[user_id] if now - t < ACTIVITY_WINDOW]
-
-def get_weekly_activity(user_id: int) -> int:
-    """Возвращает количество сообщений за последние 7 дней"""
-    now = int(time.time())
-    return sum(1 for t in user_activity.get(user_id, []) if now - t < ACTIVITY_WINDOW)
-
-def get_weekly_top(limit: int = 10) -> list[tuple[int, int]]:
-    """Возвращает топ пользователей по активности за 7 дней"""
-    now = int(time.time())
-    activity_count = {}
-    for uid, timestamps in user_activity.items():
-        count = sum(1 for t in timestamps if now - t < ACTIVITY_WINDOW)
-        if count > 0:
-            activity_count[uid] = count
-    sorted_users = sorted(activity_count.items(), key=lambda x: x[1], reverse=True)
-    return sorted_users[:limit]
-
-# ==============================
 # ПРАВИЛА
 # ==============================
 RULES_TEXT = """
 📜 <b>ПРАВИЛА!</b>
 
-<b>1.0</b> Угрозы — <i>1 день</i>
+<b>1.0</b> Угозы — <i>1 день</i>
 <b>1.1</b> Дофига матов — <i>5 часов</i>
 <b>1.2</b> Оскорбелия — <i>12 часов</i>
 <b>1.3</b> Оскорбление родителей — <i>1 день</i>
@@ -269,7 +219,6 @@ def init_db():
             created_at INTEGER
         )
     """)
-    # Таблица уровней
     c.execute("""
         CREATE TABLE IF NOT EXISTS levels (
             user_id INTEGER PRIMARY KEY,
@@ -278,43 +227,37 @@ def init_db():
             exp INTEGER DEFAULT 0
         )
     """)
-    # Таблица истории наказаний
+    # Логи действий бота
     c.execute("""
-        CREATE TABLE IF NOT EXISTS punishments_history (
+        CREATE TABLE IF NOT EXISTS mod_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT,
+            admin_id INTEGER,
+            admin_name TEXT,
+            target_id INTEGER,
+            target_name TEXT,
+            reason TEXT,
+            created_at INTEGER
+        )
+    """)
+    # Ежедневные бонусы
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS daily_bonus (
+            user_id INTEGER PRIMARY KEY,
+            last_claim INTEGER
+        )
+    """)
+    # История активности по неделям
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS activity_log (
             user_id INTEGER,
             username TEXT,
-            action TEXT,
-            reason TEXT,
-            duration TEXT,
-            moderator_id INTEGER,
-            moderator_name TEXT,
-            created_at INTEGER
+            full_name TEXT,
+            ts INTEGER
         )
     """)
     conn.commit()
     conn.close()
-    init_settings_db()
-
-def add_punishment_history(user_id: int, username: str, action: str, reason: str, duration: str, moderator_id: int, moderator_name: str):
-    """Добавляет запись в историю наказаний"""
-    conn = sqlite3.connect("moderation.db")
-    conn.execute(
-        "INSERT INTO punishments_history (user_id, username, action, reason, duration, moderator_id, moderator_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (user_id, username, action, reason, duration, moderator_id, moderator_name, int(time.time()))
-    )
-    conn.commit()
-    conn.close()
-
-def get_punishment_history(user_id: int) -> list:
-    """Возвращает историю наказаний пользователя"""
-    conn = sqlite3.connect("moderation.db")
-    rows = conn.execute(
-        "SELECT action, reason, duration, moderator_name, created_at FROM punishments_history WHERE user_id = ? ORDER BY created_at DESC",
-        (user_id,)
-    ).fetchall()
-    conn.close()
-    return rows
 
 
 # ── Mutes ──
@@ -338,6 +281,28 @@ def db_get_mutes():
     rows = conn.execute("SELECT user_id, username, until, reason FROM mutes").fetchall()
     conn.close()
     return rows
+
+def db_is_muted(user_id: int) -> tuple[bool, int | None]:
+    conn = sqlite3.connect("moderation.db")
+    row = conn.execute("SELECT until FROM mutes WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not row:
+        return False, None
+    until = row[0]
+    if until is None or until > int(time.time()):
+        return True, until
+    return False, None
+
+def db_is_banned(user_id: int) -> tuple[bool, int | None]:
+    conn = sqlite3.connect("moderation.db")
+    row = conn.execute("SELECT until FROM bans WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not row:
+        return False, None
+    until = row[0]
+    if until is None or until > int(time.time()):
+        return True, until
+    return False, None
 
 
 # ── Bans ──
@@ -397,10 +362,17 @@ def db_remove_warn_by_id(warn_id: int):
     conn.commit()
     conn.close()
 
+def db_get_all_warns_grouped():
+    conn = sqlite3.connect("moderation.db")
+    rows = conn.execute(
+        "SELECT user_id, username, COUNT(*) FROM warns GROUP BY user_id ORDER BY COUNT(*) DESC"
+    ).fetchall()
+    conn.close()
+    return rows
+
 
 # ── Levels ──
 def db_get_user_exp(user_id: int) -> tuple[int, str, str]:
-    """Возвращает (exp, username, full_name)."""
     conn = sqlite3.connect("moderation.db")
     row = conn.execute(
         "SELECT exp, username, full_name FROM levels WHERE user_id = ?", (user_id,)
@@ -421,7 +393,6 @@ def db_set_user_exp(user_id: int, username: str, full_name: str, exp: int):
     conn.close()
 
 def db_add_exp(user_id: int, username: str, full_name: str, amount: int) -> tuple[int, int]:
-    """Добавляет опыт. Возвращает (старый_уровень, новый_уровень)."""
     old_exp, old_uname, old_fname = db_get_user_exp(user_id)
     new_exp = max(0, old_exp + amount)
     db_set_user_exp(user_id, username or old_uname, full_name or old_fname, new_exp)
@@ -434,6 +405,78 @@ def db_get_top(limit: int = 10) -> list:
     rows = conn.execute(
         "SELECT user_id, username, full_name, exp FROM levels ORDER BY exp DESC LIMIT ?",
         (limit,)
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+# ── Mod Logs ──
+def db_add_log(action: str, admin_id: int, admin_name: str, target_id: int, target_name: str, reason: str):
+    conn = sqlite3.connect("moderation.db")
+    conn.execute(
+        "INSERT INTO mod_logs (action, admin_id, admin_name, target_id, target_name, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (action, admin_id, admin_name, target_id, target_name, reason, int(time.time()))
+    )
+    conn.commit()
+    conn.close()
+
+def db_get_logs(limit: int = 20):
+    conn = sqlite3.connect("moderation.db")
+    rows = conn.execute(
+        "SELECT action, admin_name, target_name, reason, created_at FROM mod_logs ORDER BY created_at DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    conn.close()
+    return rows
+
+def db_get_history(user_id: int):
+    conn = sqlite3.connect("moderation.db")
+    rows = conn.execute(
+        "SELECT action, admin_name, reason, created_at FROM mod_logs WHERE target_id = ? ORDER BY created_at DESC LIMIT 20",
+        (user_id,)
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+# ── Daily Bonus ──
+def db_get_last_daily(user_id: int) -> int:
+    conn = sqlite3.connect("moderation.db")
+    row = conn.execute("SELECT last_claim FROM daily_bonus WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def db_set_last_daily(user_id: int):
+    conn = sqlite3.connect("moderation.db")
+    conn.execute(
+        "INSERT OR REPLACE INTO daily_bonus (user_id, last_claim) VALUES (?, ?)",
+        (user_id, int(time.time()))
+    )
+    conn.commit()
+    conn.close()
+
+
+# ── Activity Log ──
+def db_log_activity(user_id: int, username: str, full_name: str):
+    conn = sqlite3.connect("moderation.db")
+    conn.execute(
+        "INSERT INTO activity_log (user_id, username, full_name, ts) VALUES (?, ?, ?, ?)",
+        (user_id, username, full_name, int(time.time()))
+    )
+    conn.commit()
+    conn.close()
+
+def db_get_week_top(limit: int = 10) -> list:
+    since = int(time.time()) - 7 * 86400
+    conn = sqlite3.connect("moderation.db")
+    rows = conn.execute(
+        """SELECT user_id, username, full_name, COUNT(*) as msgs
+           FROM activity_log
+           WHERE ts >= ?
+           GROUP BY user_id
+           ORDER BY msgs DESC
+           LIMIT ?""",
+        (since, limit)
     ).fetchall()
     conn.close()
     return rows
@@ -489,17 +532,12 @@ async def notify_user(user_id: int, text: str):
     except Exception:
         pass
 
-def parse_time_string(time_str: str) -> int:
-    """Парсит строку времени типа '10м', '2ч', '1д' в секунды"""
-    time_str = time_str.lower().strip()
-    if time_str.endswith('м'):
-        return int(time_str[:-1]) * 60
-    elif time_str.endswith('ч'):
-        return int(time_str[:-1]) * 3600
-    elif time_str.endswith('д'):
-        return int(time_str[:-1]) * 86400
-    else:
-        return 0
+def admin_display(message: Message) -> str:
+    if message.from_user:
+        u = message.from_user
+        return f"@{u.username}" if u.username else u.full_name or str(u.id)
+    return "admin"
+
 
 # ─────────────────────────────────────────────
 # Авто-выход из чужих групп
@@ -537,7 +575,7 @@ async def delete_service_messages(message: Message):
 
 
 # ─────────────────────────────────────────────
-# Антиспам + фильтр слов + лимит букв + EXP + AntiLink
+# Антиспам + фильтр слов + лимит букв + EXP
 # ─────────────────────────────────────────────
 
 NO_PERMS = ChatPermissions(
@@ -551,12 +589,9 @@ NO_PERMS = ChatPermissions(
 
 @dp.message(F.chat.id == ALLOWED_CHAT_ID, F.text, ~F.text.startswith("/"))
 async def auto_filter(message: Message):
+    global antilink_enabled
     if not message.from_user:
         return
-    
-    # Добавляем активность
-    add_activity(message.from_user.id)
-    
     is_admin = (
         message.from_user.id in ALLOWED_USERS or
         (message.from_user.username and message.from_user.username in ALLOWED_USERNAMES)
@@ -569,8 +604,9 @@ async def auto_filter(message: Message):
     now = time.time()
 
     if not is_admin:
-        # Запретные слова — мут 5 часов
         text_lower = message.text.lower()
+
+        # Запретные слова — мут 5 часов
         if any(re.search(r'(?<![а-яёa-z])' + re.escape(word) + r'(?![а-яёa-z])', text_lower) for word in BANNED_WORDS):
             mute_5h = 5 * 3600
             until_5h = message.date + timedelta(seconds=mute_5h)
@@ -578,9 +614,23 @@ async def auto_filter(message: Message):
                 await message.delete()
                 await bot.restrict_chat_member(chat_id=message.chat.id, user_id=user_id, permissions=NO_PERMS, until_date=until_5h)
                 db_add_mute(user_id, username, int(until_5h.timestamp()), "запрещённое слово")
-                add_punishment_history(user_id, username, "mute", "запрещённое слово", "5 ч", 0, "auto")
+                db_add_log("mute", 0, "bot", user_id, username, "запрещённое слово")
                 await message.answer(f"🔇 <b>{name}</b> замьючен на 5 ч\n📌 Причина: запрещённое слово", parse_mode="HTML")
                 await notify_user(user_id, f"🔇 Тебя замьютили на <b>5 ч</b>\n📌 Причина: использование запрещённого слова")
+            except Exception:
+                pass
+            return
+
+        # Антилинк
+        if antilink_enabled and LINK_PATTERN.search(message.text):
+            until_1h = message.date + timedelta(hours=1)
+            try:
+                await message.delete()
+                await bot.restrict_chat_member(chat_id=message.chat.id, user_id=user_id, permissions=NO_PERMS, until_date=until_1h)
+                db_add_mute(user_id, username, int(until_1h.timestamp()), "отправка ссылки")
+                db_add_log("mute", 0, "bot", user_id, username, "отправка ссылки")
+                await message.answer(f"🔗 <b>{name}</b> замьючен на 1 ч\n📌 Причина: отправка ссылок запрещена", parse_mode="HTML")
+                await notify_user(user_id, "🔗 Тебя замьютили на <b>1 ч</b>\n📌 Причина: отправка ссылок запрещена")
             except Exception:
                 pass
             return
@@ -592,20 +642,8 @@ async def auto_filter(message: Message):
                 await message.delete()
                 await bot.restrict_chat_member(chat_id=message.chat.id, user_id=user_id, permissions=NO_PERMS, until_date=until_1h)
                 db_add_mute(user_id, username, int(until_1h.timestamp()), f"превышен лимит {MAX_MESSAGE_LENGTH} символов")
-                add_punishment_history(user_id, username, "mute", f"превышен лимит {MAX_MESSAGE_LENGTH} символов", "1 ч", 0, "auto")
                 await message.answer(f"🔇 <b>{name}</b> замьючен на 1 ч\n📌 Причина: сообщение превышает {MAX_MESSAGE_LENGTH} символов", parse_mode="HTML")
                 await notify_user(user_id, f"🔇 Тебя замьютили на <b>1 ч</b>\n📌 Причина: сообщение превышает {MAX_MESSAGE_LENGTH} символов")
-            except Exception:
-                pass
-            return
-
-        # AntiLink — удаление ссылок
-        antilink_enabled = get_setting("antilink", "off") == "on"
-        if antilink_enabled and LINK_PATTERN.search(message.text):
-            try:
-                await message.delete()
-                await message.answer(f"🔗 <b>{name}</b>, ссылки запрещены!", parse_mode="HTML")
-                await notify_user(user_id, f"🔗 Ваше сообщение было удалено за содержащуюся ссылку.")
             except Exception:
                 pass
             return
@@ -620,19 +658,20 @@ async def auto_filter(message: Message):
                 await message.delete()
                 await bot.restrict_chat_member(chat_id=message.chat.id, user_id=user_id, permissions=NO_PERMS, until_date=until_1h)
                 db_add_mute(user_id, username, int(until_1h.timestamp()), "спам")
-                add_punishment_history(user_id, username, "mute", "спам", "1 ч", 0, "auto")
+                db_add_log("mute", 0, "bot", user_id, username, "спам")
                 await message.answer(f"🔇 <b>{name}</b> замьючен на 1 ч\n📌 Причина: спам", parse_mode="HTML")
                 await notify_user(user_id, f"🔇 Тебя замьютили на <b>1 ч</b>\n📌 Причина: спам")
             except Exception:
                 pass
             return
 
-    # ── Начисление опыта (с cooldown, для всех включая админов) ──
+    # ── Начисление опыта + логирование активности ──
     last_exp = exp_cooldown_tracker.get(user_id, 0)
     if now - last_exp >= EXP_COOLDOWN:
         exp_gain = random.randint(EXP_PER_MESSAGE_MIN, EXP_PER_MESSAGE_MAX)
         old_lvl, new_lvl = db_add_exp(user_id, username, full_name, exp_gain)
         exp_cooldown_tracker[user_id] = now
+        db_log_activity(user_id, username, full_name)
         if new_lvl > old_lvl:
             lvl_name = get_level_name(new_lvl)
             await message.answer(
@@ -643,32 +682,121 @@ async def auto_filter(message: Message):
 
 
 # ─────────────────────────────────────────────
-# Антирейд защита
+# Вспомогательные функции парсинга
 # ─────────────────────────────────────────────
 
-@dp.chat_member(ChatMemberUpdatedFilter(JOIN_TRANSITION))
-async def antiraid_check(event: ChatMemberUpdated):
-    if event.chat.id != ALLOWED_CHAT_ID:
-        return
-    
-    if get_setting("antiraid", "off") != "on":
-        return
-    
-    user_id = event.new_chat_member.user.id
-    now = time.time()
-    
-    # Проверяем не заходит ли один и тот же пользователь много раз
-    antiraid_join_tracker[user_id] = [t for t in antiraid_join_tracker[user_id] if now - t < ANTIRAID_WINDOW]
-    antiraid_join_tracker[user_id].append(now)
-    
-    if len(antiraid_join_tracker[user_id]) >= ANTIRAID_JOIN_LIMIT:
-        # Подозрение на рейд — кикаем пользователя
+def parse_args(text: str):
+    parts = text.strip().split(maxsplit=3)
+    if len(parts) < 3:
+        return None
+    target = parts[0].lstrip("@")
+    try:
+        amount = int(parts[1])
+    except ValueError:
+        return None
+    unit = parts[2].lower()
+    if unit in ("ч", "h", "час", "часов"):
+        seconds = amount * 3600
+    elif unit in ("м", "m", "мин", "минут"):
+        seconds = amount * 60
+    elif unit in ("д", "d", "день", "дней"):
+        seconds = amount * 86400
+    else:
+        return None
+    reason = parts[3] if len(parts) > 3 else "не указана"
+    return target, seconds, reason
+
+def parse_target_only(text: str):
+    return text.strip().lstrip("@") or None
+
+async def resolve_target(chat_id: int, target: str, reply_message: Message = None):
+    if reply_message:
+        u = reply_message.from_user
+        if u:
+            return u.id, u.username or str(u.id)
+    if not target:
+        return None, None
+    if target.lstrip("-").isdigit():
+        user_id = int(target)
         try:
-            await bot.ban_chat_member(event.chat.id, user_id)
-            await bot.unban_chat_member(event.chat.id, user_id, only_if_banned=True)
-            await bot.send_message(event.chat.id, f"⚠️ Пользователь @{event.new_chat_member.user.username or user_id} заподозрен в рейде и был кикнут.")
+            member = await bot.get_chat_member(chat_id, user_id)
+            name = member.user.username or str(user_id)
+            return user_id, name
         except Exception:
-            pass
+            return user_id, str(user_id)
+    try:
+        member = await bot.get_chat_member(chat_id, f"@{target}")
+        return member.user.id, target
+    except Exception:
+        return None, target
+
+async def parse_mute_ban_args(message: Message):
+    args_text = message.text.partition(" ")[2].strip()
+    if message.reply_to_message:
+        parts = args_text.split(maxsplit=2)
+        if len(parts) < 2:
+            return None, None, None, None
+        try:
+            amount = int(parts[0])
+        except ValueError:
+            return None, None, None, None
+        unit = parts[1].lower()
+        if unit in ("ч", "h", "час", "часов"):
+            seconds = amount * 3600
+        elif unit in ("м", "m", "мин", "минут"):
+            seconds = amount * 60
+        elif unit in ("д", "d", "день", "дней"):
+            seconds = amount * 86400
+        else:
+            return None, None, None, None
+        reason = parts[2] if len(parts) > 2 else "не указана"
+        user_id, name = await resolve_target(message.chat.id, None, message.reply_to_message)
+    else:
+        parsed = parse_args(args_text)
+        if not parsed:
+            return None, None, None, None
+        target, seconds, reason = parsed
+        user_id, name = await resolve_target(message.chat.id, target)
+    return user_id, name, seconds, reason
+
+
+async def resolve_level_target(message: Message) -> tuple[int | None, str, str]:
+    args_text = message.text.partition(" ")[2].strip()
+    if message.reply_to_message and message.reply_to_message.from_user:
+        u = message.reply_to_message.from_user
+        return u.id, u.username or str(u.id), u.full_name or ""
+    if args_text:
+        target = args_text.lstrip("@")
+        uid, uname = await resolve_target(message.chat.id, target)
+        return uid, uname or target, ""
+    if message.from_user:
+        u = message.from_user
+        return u.id, u.username or str(u.id), u.full_name or ""
+    return None, "", ""
+
+
+async def parse_admin_level_args(message: Message) -> tuple[int | None, str, str, int | None]:
+    parts = message.text.strip().split()
+    arg_parts = parts[2:]
+    if message.reply_to_message and message.reply_to_message.from_user:
+        if not arg_parts:
+            return None, "", "", None
+        try:
+            amount = int(arg_parts[0])
+        except ValueError:
+            return None, "", "", None
+        u = message.reply_to_message.from_user
+        return u.id, u.username or str(u.id), u.full_name or "", amount
+    else:
+        if len(arg_parts) < 2:
+            return None, "", "", None
+        target = arg_parts[0].lstrip("@")
+        try:
+            amount = int(arg_parts[1])
+        except ValueError:
+            return None, "", "", None
+        uid, uname = await resolve_target(message.chat.id, target)
+        return uid, uname or target, "", amount
 
 
 # ─────────────────────────────────────────────
@@ -677,8 +805,29 @@ async def antiraid_check(event: ChatMemberUpdated):
 
 @dp.chat_member(ChatMemberUpdatedFilter(JOIN_TRANSITION))
 async def welcome_new_member(event: ChatMemberUpdated):
+    global antiraid_enabled, recent_joins
     if event.chat.id != ALLOWED_CHAT_ID:
         return
+
+    # Антирейд
+    if antiraid_enabled:
+        now = time.time()
+        recent_joins = [t for t in recent_joins if now - t < ANTIRAID_JOIN_WINDOW]
+        recent_joins.append(now)
+        if len(recent_joins) >= ANTIRAID_JOIN_LIMIT:
+            u = event.new_chat_member.user
+            try:
+                await bot.ban_chat_member(chat_id=event.chat.id, user_id=u.id)
+                await bot.send_message(
+                    event.chat.id,
+                    f"🛡️ <b>Антирейд:</b> обнаружена подозрительная активность! "
+                    f"Пользователь <b>{u.full_name}</b> заблокирован.",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            return
+
     u = event.new_chat_member.user
     name = f"@{u.username}" if u.username else u.full_name
     await bot.send_message(
@@ -778,12 +927,15 @@ async def cmd_help(message: Message):
         "📋 <b>Список команд:</b>\n\n"
         "📜 <b>/rules</b> — правила чата\n"
         "🚨 <b>/report</b> текст — репорт модераторам\n"
-        "👻 <b>/activ</b> — анонимно в канал (личка)\n\n"
-        "🏅 <b>/ранг</b> [@ник или ID] — уровень и опыт\n"
-        "📊 <b>/profile</b> — твой профиль (XP + уровень)\n"
+        "👻 <b>/activ</b> — анонимно в канал (личка)\n"
+        "🆔 <b>/id</b> — узнать ID\n\n"
+        "🏅 <b>/ранг</b> [@ник] — уровень и опыт\n"
+        "📊 <b>/profile</b> — твой профиль\n"
+        "🏆 <b>/leader</b> — топ-30\n"
+        "🔥 <b>/leaderweek</b> — топ активных за 7 дней\n"
         "🎁 <b>/daily</b> — ежедневный бонус XP\n"
-        "🔥 <b>/leaderweek</b> — топ активных за 7 дней\n\n"
-        "🛡️ <b>Модерация:</b>\n"
+        "🎲 <b>/roll</b> — случайное число 1–100\n"
+        "😂 <b>/joke</b> — рандомная шутка\n\n"
         "🔇 <b>/mute</b> @ник 30 м [причина]\n"
         "🔊 <b>/unmute</b> @ник\n"
         "🔨 <b>/ban</b> @ник 24 ч [причина]\n"
@@ -791,26 +943,25 @@ async def cmd_help(message: Message):
         "✅ <b>/unban</b> @ник\n"
         "👢 <b>/kick</b> @ник [причина]\n"
         "⚠️ <b>/warn</b> @ник [причина]\n"
-        "🚫 <b>/ro</b> @ник [30 м] [причина]\n"
-        "🔇 <b>/muteall</b> 10м — временно запрещает писать всем\n"
-        "🧹 <b>/clear</b> 10 — удалить последние сообщения\n"
-        "🚨 <b>/antiraid</b> on/off — защита от рейда\n"
-        "🔗 <b>/antilink</b> on/off — удаление ссылок\n\n"
-        "🆔 <b>/id</b> — узнать ID\n"
-        "👮 <b>/whois</b> @ник — полная информация\n"
-        "🧾 <b>/history</b> @ник — история наказаний\n\n"
+        "🚫 <b>/ro</b> @ник [время] [причина]\n"
+        "🧹 <b>/clear</b> <кол-во> — удалить сообщения\n"
+        "🔇 <b>/muteall</b> 10м — заблокировать всех\n\n"
         "📊 <b>/activmute</b> — кто в муте\n"
         "📊 <b>/activban</b> — кто в бане\n"
         "📊 <b>/activwarns</b> @ник — варны пользователя\n"
+        "👮 <b>/whois</b> @ник — полная инфа о юзере\n"
+        "🧾 <b>/history</b> @ник — история наказаний\n"
         "📜 <b>/logs</b> — последние действия бота\n\n"
+        "🛡️ <b>/antiraid on/off</b> — защита от рейда\n"
+        "🔗 <b>/antilink on/off</b> — блок ссылок\n"
+        "🔍 <b>/scan</b> — проверить чат на спам\n"
+        "⚙️ <b>/settings</b> — настройки чата\n\n"
         "🛠 <b>Только для админов:</b>\n"
         "➕ <b>/add lvl</b> @ник (число) — добавить уровни\n"
         "➕ <b>/add exp</b> @ник (число) — добавить опыт\n"
+        "⭐ <b>/setxp</b> @ник (число) — установить XP\n"
         "➖ <b>/fine lvl</b> @ник (число) — снять уровни\n"
-        "➖ <b>/fine exp</b> @ник (число) — снять опыт\n"
-        "⭐ <b>/setxp</b> @ник 500 — установить опыт\n\n"
-        "🎲 <b>/roll</b> — случайное число 1-100\n"
-        "😂 <b>/joke</b> — случайная шутка\n\n"
+        "➖ <b>/fine exp</b> @ник (число) — снять опыт\n\n"
         "💡 Все команды работают через ответ на сообщение",
         parse_mode="HTML",
     )
@@ -906,8 +1057,6 @@ async def cmd_rank(message: Message):
         return await message.reply("❌ Пользователь не найден.")
 
     exp, db_username, db_fullname = db_get_user_exp(user_id)
-
-    # Отображаемое имя
     uname = username or db_username
     fname = full_name or db_fullname
     if uname and not uname.lstrip('-').isdigit():
@@ -921,7 +1070,6 @@ async def cmd_rank(message: Message):
     lvl_name = get_level_name(level)
     bar = make_progress_bar(current_in_level, need_next)
 
-    # Место в топе
     top = db_get_top(limit=1000)
     rank_pos = next((i + 1 for i, row in enumerate(top) if row[0] == user_id), None)
     rank_text = f"🏆 Место в топе: <b>#{rank_pos}</b>\n" if rank_pos else ""
@@ -937,57 +1085,54 @@ async def cmd_rank(message: Message):
 
 
 # ─────────────────────────────────────────────
-# /profile — профиль пользователя
+# /profile — профиль пользователя (для всех)
 # ─────────────────────────────────────────────
 
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
     if not is_allowed_chat(message):
         return
-    
-    user_id, username, full_name = await resolve_level_target(message)
-    if not user_id:
-        return await message.reply("❌ Пользователь не найден.")
-    
-    exp, db_username, db_fullname = db_get_user_exp(user_id)
-    uname = username or db_username
-    fname = full_name or db_fullname
-    
-    if uname and not uname.lstrip('-').isdigit():
-        display_name = f"@{uname}"
-    elif fname:
-        display_name = fname
-    else:
-        display_name = f"id{user_id}"
-    
-    level, current_in_level, need_next = calculate_level(exp)
+    if not message.from_user:
+        return
+
+    u = message.from_user
+    user_id = u.id
+    username = u.username or str(user_id)
+    full_name = u.full_name or ""
+    display = f"@{username}" if u.username else full_name
+
+    exp, _, _ = db_get_user_exp(user_id)
+    level, current_in, need_next = calculate_level(exp)
     lvl_name = get_level_name(level)
-    bar = make_progress_bar(current_in_level, need_next)
-    
-    # Проверяем в муте/бане ли пользователь
-    mute_status = "✅ Нет"
-    ban_status = "✅ Нет"
-    
-    mutes = db_get_mutes()
-    for uid, _, until, _ in mutes:
-        if uid == user_id and (until is None or until > int(time.time())):
-            mute_status = "🔇 В муте"
-            break
-    
-    bans = db_get_bans()
-    for uid, _, until, _ in bans:
-        if uid == user_id and (until is None or until > int(time.time())):
-            ban_status = "🔨 В бане"
-            break
-    
-    warns_count = len(db_get_warns(user_id))
-    
+    bar = make_progress_bar(current_in, need_next)
+
+    warns = db_get_warns(user_id)
+    muted, mute_until = db_is_muted(user_id)
+    banned, ban_until = db_is_banned(user_id)
+
+    top = db_get_top(limit=1000)
+    rank_pos = next((i + 1 for i, row in enumerate(top) if row[0] == user_id), None)
+
+    # Активность за неделю
+    since = int(time.time()) - 7 * 86400
+    conn = sqlite3.connect("moderation.db")
+    week_msgs = conn.execute(
+        "SELECT COUNT(*) FROM activity_log WHERE user_id = ? AND ts >= ?", (user_id, since)
+    ).fetchone()[0]
+    conn.close()
+
+    mute_status = f"🔇 До {fmt_time_left(mute_until)}" if muted else "✅ Нет"
+    ban_status = f"🔨 До {fmt_time_left(ban_until)}" if banned else "✅ Нет"
+
     await message.reply(
-        f"📊 <b>Профиль {display_name}</b>\n\n"
+        f"👤 <b>Профиль {display}</b>\n"
+        f"🆔 ID: <code>{user_id}</code>\n\n"
         f"⭐ Уровень: <b>{level}</b> — {lvl_name}\n"
         f"✨ Опыт: <b>{exp}</b>\n"
-        f"📊 Прогресс: {bar} <b>{current_in_level}/{need_next}</b>\n\n"
-        f"⚠️ Варны: <b>{warns_count}</b>\n"
+        f"📊 Прогресс: {bar} <b>{current_in}/{need_next}</b>\n"
+        f"🏆 Место в топе: <b>#{rank_pos or '—'}</b>\n\n"
+        f"💬 Сообщений за неделю: <b>{week_msgs}</b>\n"
+        f"⚠️ Варны: <b>{len(warns)}</b>\n"
         f"🔇 Мут: {mute_status}\n"
         f"🔨 Бан: {ban_status}",
         parse_mode="HTML"
@@ -995,7 +1140,7 @@ async def cmd_profile(message: Message):
 
 
 # ─────────────────────────────────────────────
-# /leader — топ-30 по уровням
+# /leader — топ-30
 # ─────────────────────────────────────────────
 
 @dp.message(Command("leader"))
@@ -1013,22 +1158,18 @@ async def cmd_leader(message: Message):
     for i, (user_id, username, full_name, exp) in enumerate(top, start=1):
         level, current_in, need_next = calculate_level(exp)
         lvl_name = get_level_name(level)
-
-        # Отображаемое имя
         if username and not username.lstrip('-').isdigit():
             display = f"@{username}"
         elif full_name:
             display = full_name
         else:
             display = f"id{user_id}"
-
         medal = medals.get(i, f"{i}.")
         lines.append(
             f"{medal} <b>{display}</b>\n"
             f"   ⭐ Ур. {level} — {lvl_name}  |  ✨ {exp} exp\n"
         )
 
-    # Показываем место самого пользователя, если его нет в топ-30
     if message.from_user:
         uid = message.from_user.id
         in_top = any(row[0] == uid for row in top)
@@ -1044,33 +1185,31 @@ async def cmd_leader(message: Message):
 
 
 # ─────────────────────────────────────────────
-# /leaderweek — топ за 7 дней
+# /leaderweek — топ активных за 7 дней
 # ─────────────────────────────────────────────
 
 @dp.message(Command("leaderweek"))
 async def cmd_leaderweek(message: Message):
     if not is_allowed_chat(message):
         return
-    
-    top = get_weekly_top(limit=15)
+
+    top = db_get_week_top(limit=10)
     if not top:
-        return await message.reply("📊 За последние 7 дней никто не писал сообщений!")
-    
+        return await message.reply("📊 За последние 7 дней активности не зафиксировано.")
+
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    lines = ["🔥 <b>ТОП АКТИВНЫХ ЗА 7 ДНЕЙ</b>\n"]
-    
-    for i, (user_id, count) in enumerate(top, start=1):
-        exp, username, full_name = db_get_user_exp(user_id)
+    lines = ["🔥 <b>ТОП-10 АКТИВНЫХ ЗА 7 ДНЕЙ</b>\n"]
+
+    for i, (user_id, username, full_name, msgs) in enumerate(top, start=1):
         if username and not username.lstrip('-').isdigit():
             display = f"@{username}"
         elif full_name:
             display = full_name
         else:
             display = f"id{user_id}"
-        
         medal = medals.get(i, f"{i}.")
-        lines.append(f"{medal} <b>{display}</b> — {count} сообщ.")
-    
+        lines.append(f"{medal} <b>{display}</b> — 💬 {msgs} сообщ.\n")
+
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
@@ -1084,33 +1223,47 @@ async def cmd_daily(message: Message):
         return
     if not message.from_user:
         return
-    
-    user_id = message.from_user.id
+
+    u = message.from_user
+    user_id = u.id
+    username = u.username or str(user_id)
+    full_name = u.full_name or ""
+    display = f"@{username}" if u.username else full_name
+
+    last = db_get_last_daily(user_id)
     now = int(time.time())
-    last_bonus = daily_bonus_tracker.get(user_id, 0)
-    
-    if now - last_bonus < DAILY_COOLDOWN:
-        remaining = DAILY_COOLDOWN - (now - last_bonus)
-        hours = remaining // 3600
-        minutes = (remaining % 3600) // 60
-        return await message.reply(f"⏰ Ты уже получал ежедневный бонус!\nСледующий бонус через <b>{hours}ч {minutes}м</b>", parse_mode="HTML")
-    
-    # Начисляем бонус
-    username = message.from_user.username or str(user_id)
-    full_name = message.from_user.full_name or ""
-    old_lvl, new_lvl = db_add_exp(user_id, username, full_name, DAILY_BONUS_EXP)
-    daily_bonus_tracker[user_id] = now
-    
-    await message.reply(
-        f"🎁 <b>Ежедневный бонус!</b>\n"
-        f"✨ Ты получил <b>{DAILY_BONUS_EXP}</b> опыта!\n"
-        f"⭐ Текущий уровень: <b>{new_lvl}</b> — {get_level_name(new_lvl)}",
-        parse_mode="HTML"
+    cooldown = 86400  # 24 часа
+
+    if now - last < cooldown:
+        remaining = cooldown - (now - last)
+        h, rem = divmod(remaining, 3600)
+        m = rem // 60
+        return await message.reply(
+            f"⏳ <b>{display}</b>, следующий бонус через <b>{h}ч {m}м</b>!",
+            parse_mode="HTML"
+        )
+
+    bonus = random.randint(DAILY_BONUS_MIN, DAILY_BONUS_MAX)
+    old_lvl, new_lvl = db_add_exp(user_id, username, full_name, bonus)
+    db_set_last_daily(user_id)
+
+    exp, _, _ = db_get_user_exp(user_id)
+    level, current_in, need_next = calculate_level(exp)
+    lvl_name = get_level_name(level)
+
+    text = (
+        f"🎁 <b>{display}</b>, ты забрал ежедневный бонус!\n"
+        f"✨ +{bonus} XP\n"
+        f"⭐ Уровень: <b>{level}</b> — {lvl_name}"
     )
+    if new_lvl > old_lvl:
+        text += f"\n🎉 Новый уровень! <b>{new_lvl}</b> — {get_level_name(new_lvl)}"
+
+    await message.reply(text, parse_mode="HTML")
 
 
 # ─────────────────────────────────────────────
-# /setxp — установить опыт пользователю (админ)
+# /setxp — установить XP вручную (только админы)
 # ─────────────────────────────────────────────
 
 @dp.message(Command("setxp"))
@@ -1119,50 +1272,258 @@ async def cmd_setxp(message: Message):
         return
     if not is_allowed(message):
         return
-    
-    parts = message.text.strip().split()
-    if len(parts) < 3:
-        return await message.reply(
-            "⚠️ Использование:\n"
-            "/setxp @ник 500\n"
-            "или ответь на сообщение: /setxp 500"
-        )
-    
+
+    args_text = message.text.partition(" ")[2].strip()
+
     if message.reply_to_message and message.reply_to_message.from_user:
+        u = message.reply_to_message.from_user
+        uid = u.id
+        uname = u.username or str(u.id)
+        fname = u.full_name or ""
+        try:
+            amount = int(args_text)
+        except ValueError:
+            return await message.reply("⚠️ Укажи количество XP: /setxp <число> (в ответ на сообщение)")
+    else:
+        parts = args_text.split(maxsplit=1)
+        if len(parts) < 2:
+            return await message.reply("⚠️ Использование: /setxp @ник <число>")
+        target = parts[0].lstrip("@")
         try:
             amount = int(parts[1])
         except ValueError:
-            return await message.reply("❌ Укажи число опыта")
-        user_id = message.reply_to_message.from_user.id
-        username = message.reply_to_message.from_user.username or str(user_id)
-        full_name = message.reply_to_message.from_user.full_name or ""
-    else:
-        target = parts[1].lstrip("@")
-        try:
-            amount = int(parts[2])
-        except ValueError:
-            return await message.reply("❌ Укажи число опыта")
-        user_id, username = await resolve_target(message.chat.id, target)
-        if not user_id:
+            return await message.reply("❌ Число XP должно быть целым.")
+        uid, uname = await resolve_target(message.chat.id, target)
+        if not uid:
             return await message.reply("❌ Пользователь не найден.")
-        full_name = ""
-    
+        fname = ""
+
     if amount < 0:
-        return await message.reply("❌ Опыт не может быть отрицательным.")
-    
-    db_set_user_exp(user_id, username, full_name, amount)
-    new_level, _, _ = calculate_level(amount)
-    
+        return await message.reply("❌ XP не может быть отрицательным.")
+
+    old_exp, db_uname, db_fname = db_get_user_exp(uid)
+    db_set_user_exp(uid, uname or db_uname, fname or db_fname, amount)
+    level, _, _ = calculate_level(amount)
+    display = f"@{uname}" if uname and not uname.lstrip('-').isdigit() else f"id{uid}"
+
     await message.reply(
-        f"⭐ <b>{format_display(username)}</b> установлен опыт <b>{amount}</b>\n"
-        f"Уровень: <b>{new_level}</b> — {get_level_name(new_level)}",
+        f"⭐ <b>{display}</b>: XP установлен в <b>{amount}</b>\n"
+        f"⭐ Уровень: <b>{level}</b> — {get_level_name(level)}",
         parse_mode="HTML"
     )
-    await notify_user(user_id, f"⭐ Тебе установили {amount} опыта!\nУровень: {new_level} — {get_level_name(new_level)}")
+    await notify_user(uid, f"⭐ Твой XP установлен на <b>{amount}</b>\n⭐ Уровень: <b>{level}</b> — {get_level_name(level)}")
 
 
 # ─────────────────────────────────────────────
-# /whois — полная информация о пользователе
+# /roll — случайное число
+# ─────────────────────────────────────────────
+
+@dp.message(Command("roll"))
+async def cmd_roll(message: Message):
+    if not is_allowed_chat(message):
+        return
+    n = random.randint(1, 100)
+    name = ""
+    if message.from_user:
+        u = message.from_user
+        name = f"@{u.username}" if u.username else u.full_name
+    await message.reply(f"🎲 <b>{name}</b> бросил кубик: <b>{n}</b> из 100!", parse_mode="HTML")
+
+
+# ─────────────────────────────────────────────
+# /joke — рандомная шутка
+# ─────────────────────────────────────────────
+
+@dp.message(Command("joke"))
+async def cmd_joke(message: Message):
+    if not is_allowed_chat(message):
+        return
+    joke = random.choice(JOKES)
+    await message.reply(f"😂 {joke}")
+
+
+# ─────────────────────────────────────────────
+# /antiraid on/off
+# ─────────────────────────────────────────────
+
+@dp.message(Command("antiraid"))
+async def cmd_antiraid(message: Message):
+    global antiraid_enabled
+    if not is_allowed_chat(message):
+        return
+    if not is_allowed(message):
+        return
+    arg = message.text.partition(" ")[2].strip().lower()
+    if arg == "on":
+        antiraid_enabled = True
+        await message.reply("🛡️ Антирейд <b>включён</b>. Подозрительные аккаунты будут блокироваться.", parse_mode="HTML")
+    elif arg == "off":
+        antiraid_enabled = False
+        await message.reply("🛡️ Антирейд <b>выключен</b>.", parse_mode="HTML")
+    else:
+        status = "включён 🟢" if antiraid_enabled else "выключен 🔴"
+        await message.reply(f"🛡️ Антирейд сейчас <b>{status}</b>\nИспользование: /antiraid on/off", parse_mode="HTML")
+
+
+# ─────────────────────────────────────────────
+# /antilink on/off
+# ─────────────────────────────────────────────
+
+@dp.message(Command("antilink"))
+async def cmd_antilink(message: Message):
+    global antilink_enabled
+    if not is_allowed_chat(message):
+        return
+    if not is_allowed(message):
+        return
+    arg = message.text.partition(" ")[2].strip().lower()
+    if arg == "on":
+        antilink_enabled = True
+        await message.reply("🔗 Антилинк <b>включён</b>. Ссылки будут удаляться.", parse_mode="HTML")
+    elif arg == "off":
+        antilink_enabled = False
+        await message.reply("🔗 Антилинк <b>выключен</b>.", parse_mode="HTML")
+    else:
+        status = "включён 🟢" if antilink_enabled else "выключен 🔴"
+        await message.reply(f"🔗 Антилинк сейчас <b>{status}</b>\nИспользование: /antilink on/off", parse_mode="HTML")
+
+
+# ─────────────────────────────────────────────
+# /clear <кол-во> — удалить последние N сообщений
+# ─────────────────────────────────────────────
+
+@dp.message(Command("clear"))
+async def cmd_clear(message: Message):
+    if not is_allowed_chat(message):
+        return
+    if not is_allowed(message):
+        return
+    args = message.text.partition(" ")[2].strip()
+    try:
+        count = int(args)
+        if count < 1 or count > 100:
+            raise ValueError
+    except ValueError:
+        return await message.reply("⚠️ Укажи количество сообщений от 1 до 100: /clear <число>")
+
+    deleted = 0
+    msg_id = message.message_id
+    for i in range(1, count + 2):
+        try:
+            await bot.delete_message(message.chat.id, msg_id - i)
+            deleted += 1
+        except Exception:
+            pass
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    confirm = await bot.send_message(message.chat.id, f"🧹 Удалено <b>{deleted}</b> сообщений.", parse_mode="HTML")
+    await asyncio.sleep(3)
+    try:
+        await confirm.delete()
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────
+# /muteall <время> — временный lockdown
+# ─────────────────────────────────────────────
+
+@dp.message(Command("muteall"))
+async def cmd_muteall(message: Message):
+    if not is_allowed_chat(message):
+        return
+    if not is_allowed(message):
+        return
+
+    args = message.text.partition(" ")[2].strip().split()
+    seconds = 0
+    if args:
+        try:
+            amount = int(args[0][:-1])
+            unit = args[0][-1].lower()
+            if unit == "м":
+                seconds = amount * 60
+            elif unit == "ч":
+                seconds = amount * 3600
+            elif unit == "д":
+                seconds = amount * 86400
+        except (ValueError, IndexError):
+            return await message.reply("⚠️ Использование: /muteall 10м | /muteall 2ч | /muteall 1д")
+
+    no_send = ChatPermissions(
+        can_send_messages=False,
+        can_send_media_messages=False,
+        can_send_polls=False,
+        can_send_other_messages=False,
+        can_add_web_page_previews=False,
+    )
+
+    try:
+        await bot.set_chat_permissions(message.chat.id, no_send)
+        duration_text = format_duration(seconds) if seconds else "до ручного снятия"
+        await message.reply(f"🔇 <b>Lockdown активирован</b> на {duration_text}.\nВсем запрещено писать.", parse_mode="HTML")
+
+        if seconds:
+            await asyncio.sleep(seconds)
+            full_perms = ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+            )
+            await bot.set_chat_permissions(message.chat.id, full_perms)
+            await bot.send_message(message.chat.id, "🔓 Lockdown снят. Все могут писать.")
+    except Exception as e:
+        await message.reply(f"❌ Ошибка: {e}")
+
+
+# ─────────────────────────────────────────────
+# /scan — проверка чата на подозрительных
+# ─────────────────────────────────────────────
+
+@dp.message(Command("scan"))
+async def cmd_scan(message: Message):
+    if not is_allowed_chat(message):
+        return
+    if not is_allowed(message):
+        return
+
+    now = int(time.time())
+    lines = ["🔍 <b>Результаты сканирования чата</b>\n"]
+
+    # Активные муты
+    mutes = db_get_mutes()
+    active_mutes = [(uid, uname, until, r) for uid, uname, until, r in mutes if until is None or until > now]
+
+    # Активные баны
+    bans = db_get_bans()
+    active_bans = [(uid, uname, until, r) for uid, uname, until, r in bans if until is None or until > now]
+
+    # Многоварновые
+    warns_grouped = db_get_all_warns_grouped()
+    multi_warned = [(uid, uname, cnt) for uid, uname, cnt in warns_grouped if cnt >= 3]
+
+    lines.append(f"🔇 Активных мутов: <b>{len(active_mutes)}</b>")
+    lines.append(f"🔨 Активных банов: <b>{len(active_bans)}</b>")
+    lines.append(f"⚠️ Пользователей с 3+ варнами: <b>{len(multi_warned)}</b>")
+
+    if multi_warned:
+        lines.append("\n👁 <b>Подозрительные (3+ варна):</b>")
+        for uid, uname, cnt in multi_warned[:5]:
+            display = f"@{uname}" if uname and not uname.lstrip('-').isdigit() else f"id{uid}"
+            lines.append(f"• {display} — {cnt} варн(ов)")
+
+    lines.append(f"\n✅ Сканирование завершено.")
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+# ─────────────────────────────────────────────
+# /whois @user — полная инфа о пользователе
 # ─────────────────────────────────────────────
 
 @dp.message(Command("whois"))
@@ -1171,75 +1532,47 @@ async def cmd_whois(message: Message):
         return
     if not is_allowed(message):
         return
-    
+
     args_text = message.text.partition(" ")[2].strip()
     target = parse_target_only(args_text)
-    user_id, username = await resolve_target(message.chat.id, target, message.reply_to_message)
-    
+    chat_id = message.chat.id if not is_private(message) else ALLOWED_CHAT_ID
+    user_id, name = await resolve_target(chat_id, target, message.reply_to_message)
+
     if not user_id:
-        return await message.reply("❌ Пользователь не найден.")
-    
-    # Получаем информацию
-    exp, db_username, db_fullname = db_get_user_exp(user_id)
-    uname = username or db_username
-    fname = db_fullname
-    
-    level, _, _ = calculate_level(exp)
+        return await message.reply("❌ Укажи пользователя: /whois @ник или ID")
+
+    exp, db_uname, db_fname = db_get_user_exp(user_id)
+    level, current_in, need_next = calculate_level(exp)
     lvl_name = get_level_name(level)
-    
-    # Мут/бан статус
-    mute_status = "✅ Нет"
-    ban_status = "✅ Нет"
-    mute_info = ""
-    ban_info = ""
-    
-    mutes = db_get_mutes()
-    for uid, _, until, reason in mutes:
-        if uid == user_id and (until is None or until > int(time.time())):
-            left = fmt_time_left(until)
-            mute_status = f"🔇 Да (ещё {left})"
-            mute_info = f"\n📌 Причина: {reason}"
-            break
-    
-    bans = db_get_bans()
-    for uid, _, until, reason in bans:
-        if uid == user_id and (until is None or until > int(time.time())):
-            left = fmt_time_left(until)
-            ban_status = f"🔨 Да ({left})"
-            ban_info = f"\n📌 Причина: {reason}"
-            break
-    
-    warns_count = len(db_get_warns(user_id))
-    weekly_activity = get_weekly_activity(user_id)
-    
-    # Пытаемся получить username и имя из чата
-    try:
-        member = await bot.get_chat_member(message.chat.id, user_id)
-        if member.user:
-            uname = member.user.username or uname
-            fname = member.user.full_name or fname
-    except Exception:
-        pass
-    
-    display = f"@{uname}" if uname and not uname.lstrip('-').isdigit() else (fname or f"id{user_id}")
-    
+
+    warns = db_get_warns(user_id)
+    muted, mute_until = db_is_muted(user_id)
+    banned, ban_until = db_is_banned(user_id)
+
+    display_name = f"@{name}" if name and not name.lstrip('-').isdigit() else f"id{user_id}"
+    mute_status = f"🔇 До {fmt_time_left(mute_until)}" if muted else "✅ Чист"
+    ban_status = f"🔨 До {fmt_time_left(ban_until)}" if banned else "✅ Чист"
+
+    # Место в топе
+    top = db_get_top(limit=1000)
+    rank_pos = next((i + 1 for i, row in enumerate(top) if row[0] == user_id), None)
+
     await message.reply(
-        f"👤 <b>WHOIS: {display}</b>\n\n"
-        f"🆔 ID: <code>{user_id}</code>\n"
-        f"📛 Имя: {fname or 'Не указано'}\n"
-        f"🔖 Username: @{uname if uname else 'Нет'}\n\n"
+        f"👮 <b>Информация о пользователе</b>\n\n"
+        f"👤 Ник: <b>{display_name}</b>\n"
+        f"🆔 ID: <code>{user_id}</code>\n\n"
         f"⭐ Уровень: <b>{level}</b> — {lvl_name}\n"
         f"✨ Опыт: <b>{exp}</b>\n"
-        f"💬 Активность (7 дней): <b>{weekly_activity}</b> сообщ.\n\n"
-        f"⚠️ Варны: <b>{warns_count}</b>\n"
-        f"🔇 Мут: {mute_status}{mute_info}\n"
-        f"🔨 Бан: {ban_status}{ban_info}",
+        f"🏆 Место в топе: <b>#{rank_pos or '—'}</b>\n\n"
+        f"⚠️ Варны: <b>{len(warns)}</b>\n"
+        f"🔇 Мут: {mute_status}\n"
+        f"🔨 Бан: {ban_status}",
         parse_mode="HTML"
     )
 
 
 # ─────────────────────────────────────────────
-# /history — история наказаний
+# /history @user — история наказаний
 # ─────────────────────────────────────────────
 
 @dp.message(Command("history"))
@@ -1248,88 +1581,89 @@ async def cmd_history(message: Message):
         return
     if not is_allowed(message):
         return
-    
+
     args_text = message.text.partition(" ")[2].strip()
     target = parse_target_only(args_text)
-    user_id, username = await resolve_target(message.chat.id, target, message.reply_to_message)
-    
+    chat_id = message.chat.id if not is_private(message) else ALLOWED_CHAT_ID
+    user_id, name = await resolve_target(chat_id, target, message.reply_to_message)
+
     if not user_id:
-        return await message.reply("❌ Пользователь не найден.")
-    
-    history = get_punishment_history(user_id)
+        return await message.reply("❌ Укажи пользователя: /history @ник или ID")
+
+    display = f"@{name}" if name and not name.lstrip('-').isdigit() else f"id{user_id}"
+    history = db_get_history(user_id)
+
     if not history:
-        return await message.reply(f"✅ У {format_display(username)} нет истории наказаний.")
-    
-    lines = [f"🧾 <b>История наказаний {format_display(username)} ({len(history)})</b>\n"]
-    for action, reason, duration, moderator, created_at in history[:20]:
-        dt = datetime.fromtimestamp(created_at).strftime("%d.%m.%Y %H:%M")
-        lines.append(f"• <b>{action.upper()}</b> | {dt}\n  👮 {moderator}\n  📌 {reason}")
-        if duration and duration != "0":
-            lines[-1] += f" | ⏱ {duration}"
-    
-    await message.reply("\n\n".join(lines), parse_mode="HTML")
+        return await message.reply(f"✅ У {display} нет истории наказаний.")
+
+    lines = [f"🧾 <b>История наказаний {display}</b>\n"]
+    action_icons = {"mute": "🔇", "ban": "🔨", "kick": "👢", "warn": "⚠️", "unmute": "🔊", "unban": "✅"}
+
+    for action, admin_name, reason, ts in history:
+        dt = datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M")
+        icon = action_icons.get(action, "📌")
+        lines.append(f"{icon} <b>{action.upper()}</b> — {dt}\n   📌 {reason} (от {admin_name})\n")
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+# ─────────────────────────────────────────────
+# /logs — последние действия бота
+# ─────────────────────────────────────────────
+
+@dp.message(Command("logs"))
+async def cmd_logs(message: Message):
+    if not is_allowed_chat(message):
+        return
+    if not is_allowed(message):
+        return
+
+    logs = db_get_logs(limit=15)
+    if not logs:
+        return await message.reply("📜 Лог действий пуст.")
+
+    action_icons = {"mute": "🔇", "ban": "🔨", "kick": "👢", "warn": "⚠️", "unmute": "🔊", "unban": "✅"}
+    lines = ["📜 <b>Последние действия бота</b>\n"]
+
+    for action, admin_name, target_name, reason, ts in logs:
+        dt = datetime.fromtimestamp(ts).strftime("%d.%m %H:%M")
+        icon = action_icons.get(action, "📌")
+        lines.append(f"{icon} <b>{action.upper()}</b> → {target_name} [{dt}]\n   📌 {reason} (адм: {admin_name})\n")
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+# ─────────────────────────────────────────────
+# /settings — настройки чата
+# ─────────────────────────────────────────────
+
+@dp.message(Command("settings"))
+async def cmd_settings(message: Message):
+    if not is_allowed_chat(message):
+        return
+    if not is_allowed(message):
+        return
+
+    def st(val): return "🟢 Вкл" if val else "🔴 Выкл"
+
+    await message.reply(
+        f"⚙️ <b>Настройки чата</b>\n\n"
+        f"🛡️ Антиспам: {st(settings['antispam'])}\n"
+        f"🔗 Антилинк: {st(antilink_enabled)}\n"
+        f"🚨 Антирейд: {st(antiraid_enabled)}\n"
+        f"📏 Лимит символов: <b>{MAX_MESSAGE_LENGTH}</b>\n"
+        f"🔒 Чат заблокирован: {st(chat_locked)}\n\n"
+        f"💡 Управление:\n"
+        f"/antiraid on/off\n"
+        f"/antilink on/off\n"
+        f"/-чат / /+чат",
+        parse_mode="HTML"
+    )
 
 
 # ─────────────────────────────────────────────
 # /add lvl | /add exp — только для админов
 # ─────────────────────────────────────────────
-
-async def resolve_level_target(message: Message) -> tuple[int | None, str, str]:
-    """
-    Разрешает цель для команд уровня.
-    Поддерживает: reply, @ник, ID, пусто (сам пользователь).
-    Возвращает (user_id, username, full_name).
-    """
-    args_text = message.text.partition(" ")[2].strip()
-
-    if message.reply_to_message and message.reply_to_message.from_user:
-        u = message.reply_to_message.from_user
-        return u.id, u.username or str(u.id), u.full_name or ""
-
-    if args_text:
-        target = args_text.lstrip("@")
-        uid, uname = await resolve_target(message.chat.id, target)
-        return uid, uname or target, ""
-
-    if message.from_user:
-        u = message.from_user
-        return u.id, u.username or str(u.id), u.full_name or ""
-
-    return None, "", ""
-
-
-async def parse_admin_level_args(message: Message) -> tuple[int | None, str, str, int | None]:
-    """
-    Парсит аргументы /add и /fine.
-    Форматы:
-      /add lvl @ник 5
-      /add lvl 5  (reply)
-    Возвращает (user_id, username, full_name, amount).
-    """
-    parts = message.text.strip().split()
-    # parts[0]=/add, parts[1]=lvl/exp, parts[2..]=аргументы
-    arg_parts = parts[2:]
-
-    if message.reply_to_message and message.reply_to_message.from_user:
-        if not arg_parts:
-            return None, "", "", None
-        try:
-            amount = int(arg_parts[0])
-        except ValueError:
-            return None, "", "", None
-        u = message.reply_to_message.from_user
-        return u.id, u.username or str(u.id), u.full_name or "", amount
-    else:
-        if len(arg_parts) < 2:
-            return None, "", "", None
-        target = arg_parts[0].lstrip("@")
-        try:
-            amount = int(arg_parts[1])
-        except ValueError:
-            return None, "", "", None
-        uid, uname = await resolve_target(message.chat.id, target)
-        return uid, uname or target, "", amount
-
 
 @dp.message(Command("add"))
 async def cmd_add(message: Message):
@@ -1363,6 +1697,7 @@ async def cmd_add(message: Message):
     display = f"@{username}" if username and not username.lstrip('-').isdigit() else f"id{uid}"
     old_exp, db_uname, db_fname = db_get_user_exp(uid)
     old_level, _, _ = calculate_level(old_exp)
+    admin_name = admin_display(message)
 
     if subcmd == "lvl":
         target_level = old_level + amount
@@ -1371,6 +1706,7 @@ async def cmd_add(message: Message):
         db_add_exp(uid, username or db_uname, full_name or db_fname, exp_to_add)
         actual_exp, _, _ = db_get_user_exp(uid)
         new_level, _, _ = calculate_level(actual_exp)
+        db_add_log("add_lvl", message.from_user.id if message.from_user else 0, admin_name, uid, username, f"+{amount} уровней")
         await message.reply(
             f"➕ <b>{display}</b>: +{amount} уровн(ей)\n"
             f"⭐ Новый уровень: <b>{new_level}</b> — {get_level_name(new_level)}\n"
@@ -1382,6 +1718,7 @@ async def cmd_add(message: Message):
         db_add_exp(uid, username or db_uname, full_name or db_fname, amount)
         actual_exp, _, _ = db_get_user_exp(uid)
         new_level, _, _ = calculate_level(actual_exp)
+        db_add_log("add_exp", message.from_user.id if message.from_user else 0, admin_name, uid, username, f"+{amount} exp")
         await message.reply(
             f"➕ <b>{display}</b>: +{amount} опыта\n"
             f"⭐ Уровень: <b>{new_level}</b> — {get_level_name(new_level)}\n"
@@ -1427,6 +1764,7 @@ async def cmd_fine(message: Message):
     display = f"@{username}" if username and not username.lstrip('-').isdigit() else f"id{uid}"
     old_exp, db_uname, db_fname = db_get_user_exp(uid)
     old_level, _, _ = calculate_level(old_exp)
+    admin_name = admin_display(message)
 
     if subcmd == "lvl":
         target_level = max(0, old_level - amount)
@@ -1434,6 +1772,7 @@ async def cmd_fine(message: Message):
         db_set_user_exp(uid, username or db_uname, full_name or db_fname, target_exp)
         actual_exp, _, _ = db_get_user_exp(uid)
         new_level, _, _ = calculate_level(actual_exp)
+        db_add_log("fine_lvl", message.from_user.id if message.from_user else 0, admin_name, uid, username, f"-{amount} уровней")
         await message.reply(
             f"➖ <b>{display}</b>: -{amount} уровн(ей)\n"
             f"⭐ Новый уровень: <b>{new_level}</b> — {get_level_name(new_level)}\n"
@@ -1446,6 +1785,7 @@ async def cmd_fine(message: Message):
         db_set_user_exp(uid, username or db_uname, full_name or db_fname, new_exp)
         actual_exp, _, _ = db_get_user_exp(uid)
         new_level, _, _ = calculate_level(actual_exp)
+        db_add_log("fine_exp", message.from_user.id if message.from_user else 0, admin_name, uid, username, f"-{amount} exp")
         await message.reply(
             f"➖ <b>{display}</b>: -{amount} опыта\n"
             f"⭐ Уровень: <b>{new_level}</b> — {get_level_name(new_level)}\n"
@@ -1458,81 +1798,6 @@ async def cmd_fine(message: Message):
 # ─────────────────────────────────────────────
 # /mute
 # ─────────────────────────────────────────────
-
-async def parse_mute_ban_args(message: Message):
-    args_text = message.text.partition(" ")[2].strip()
-    if message.reply_to_message:
-        parts = args_text.split(maxsplit=2)
-        if len(parts) < 2:
-            return None, None, None, None
-        try:
-            amount = int(parts[0])
-        except ValueError:
-            return None, None, None, None
-        unit = parts[1].lower()
-        if unit in ("ч", "h", "час", "часов"):
-            seconds = amount * 3600
-        elif unit in ("м", "m", "мин", "минут"):
-            seconds = amount * 60
-        elif unit in ("д", "d", "день", "дней"):
-            seconds = amount * 86400
-        else:
-            return None, None, None, None
-        reason = parts[2] if len(parts) > 2 else "не указана"
-        user_id, name = await resolve_target(message.chat.id, None, message.reply_to_message)
-    else:
-        parsed = parse_args(args_text)
-        if not parsed:
-            return None, None, None, None
-        target, seconds, reason = parsed
-        user_id, name = await resolve_target(message.chat.id, target)
-    return user_id, name, seconds, reason
-
-def parse_args(text: str):
-    parts = text.strip().split(maxsplit=3)
-    if len(parts) < 3:
-        return None
-    target = parts[0].lstrip("@")
-    try:
-        amount = int(parts[1])
-    except ValueError:
-        return None
-    unit = parts[2].lower()
-    if unit in ("ч", "h", "час", "часов"):
-        seconds = amount * 3600
-    elif unit in ("м", "m", "мин", "минут"):
-        seconds = amount * 60
-    elif unit in ("д", "d", "день", "дней"):
-        seconds = amount * 86400
-    else:
-        return None
-    reason = parts[3] if len(parts) > 3 else "не указана"
-    return target, seconds, reason
-
-def parse_target_only(text: str):
-    return text.strip().lstrip("@") or None
-
-async def resolve_target(chat_id: int, target: str, reply_message: Message = None):
-    if reply_message:
-        u = reply_message.from_user
-        if u:
-            return u.id, u.username or str(u.id)
-    if not target:
-        return None, None
-    if target.lstrip("-").isdigit():
-        user_id = int(target)
-        try:
-            member = await bot.get_chat_member(chat_id, user_id)
-            name = member.user.username or str(user_id)
-            return user_id, name
-        except Exception:
-            return user_id, str(user_id)
-    try:
-        member = await bot.get_chat_member(chat_id, f"@{target}")
-        return member.user.id, target
-    except Exception:
-        return None, target
-
 
 @dp.message(Command("mute"))
 async def cmd_mute(message: Message):
@@ -1551,205 +1816,17 @@ async def cmd_mute(message: Message):
     if not user_id:
         return await message.reply("❌ Пользователь не найден.")
     until = message.date + timedelta(seconds=seconds)
+    admin_name = admin_display(message)
     try:
         await bot.restrict_chat_member(chat_id=message.chat.id, user_id=user_id, permissions=NO_PERMS, until_date=until)
         db_add_mute(user_id, name, int(until.timestamp()), reason)
+        db_add_log("mute", message.from_user.id if message.from_user else 0, admin_name, user_id, name, reason)
         duration_text = format_duration(seconds)
-        add_punishment_history(user_id, name, "mute", reason, duration_text, message.from_user.id, message.from_user.full_name or str(message.from_user.id))
         await message.reply(f"🔇 <b>{format_display(name)}</b> замьючен на <b>{duration_text}</b>\n📌 Причина: {reason}", parse_mode="HTML")
         chat_name = message.chat.title or str(message.chat.id)
         await notify_user(user_id, f"🔇 Тебя замьютили в чате <b>{chat_name}</b> на <b>{duration_text}</b>\n📌 Причина: {reason}")
-        await log_action("MUTE", message.from_user.full_name or str(message.from_user.id), format_display(name), reason, duration_text)
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
-
-
-# ─────────────────────────────────────────────
-# /muteall — временный локдаун
-# ─────────────────────────────────────────────
-
-@dp.message(Command("muteall"))
-async def cmd_muteall(message: Message):
-    if not is_allowed_chat(message):
-        return
-    if not is_allowed(message):
-        return
-    
-    args_text = message.text.partition(" ")[2].strip()
-    if not args_text:
-        return await message.reply("⚠️ Использование: /muteall 10м\nВарианты: 10м, 2ч, 1д")
-    
-    seconds = parse_time_string(args_text)
-    if seconds == 0:
-        return await message.reply("❌ Неверный формат времени. Пример: /muteall 10м")
-    
-    until = message.date + timedelta(seconds=seconds)
-    try:
-        await bot.restrict_chat_member(
-            chat_id=message.chat.id,
-            user_id=message.chat.id,
-            permissions=NO_PERMS,
-            until_date=until
-        )
-        await message.reply(f"🔇 <b>Чат заморожен на {format_duration(seconds)}!</b>\nПисать никто не может.", parse_mode="HTML")
-        await log_action("MUTEALL", message.from_user.full_name or str(message.from_user.id), "весь чат", "", format_duration(seconds))
-    except Exception as e:
-        await message.reply(f"❌ Ошибка: {e}")
-
-
-# ─────────────────────────────────────────────
-# /clear — очистка чата
-# ─────────────────────────────────────────────
-
-@dp.message(Command("clear"))
-async def cmd_clear(message: Message):
-    if not is_allowed_chat(message):
-        return
-    if not is_allowed(message):
-        return
-    
-    args_text = message.text.partition(" ")[2].strip()
-    if not args_text:
-        return await message.reply("⚠️ Использование: /clear <кол-во>\nПример: /clear 10")
-    
-    try:
-        count = int(args_text)
-        if count <= 0 or count > 100:
-            return await message.reply("❌ Количество должно быть от 1 до 100.")
-    except ValueError:
-        return await message.reply("❌ Укажи число.")
-    
-    deleted = 0
-    async for msg in bot.get_chat_history(message.chat.id, limit=count + 1):
-        if msg.message_id != message.message_id:
-            try:
-                await msg.delete()
-                deleted += 1
-            except Exception:
-                pass
-    
-    await message.reply(f"🧹 Удалено <b>{deleted}</b> сообщений!", parse_mode="HTML")
-    await log_action("CLEAR", message.from_user.full_name or str(message.from_user.id), f"{deleted} сообщений", "", "")
-
-
-# ─────────────────────────────────────────────
-# /antiraid on/off
-# ─────────────────────────────────────────────
-
-@dp.message(Command("antiraid"))
-async def cmd_antiraid(message: Message):
-    if not is_allowed_chat(message):
-        return
-    if not is_allowed(message):
-        return
-    
-    args_text = message.text.partition(" ")[2].strip().lower()
-    if args_text not in ("on", "off"):
-        current = "включена" if get_setting("antiraid", "off") == "on" else "выключена"
-        return await message.reply(f"🛡️ Антирейд защита сейчас <b>{current}</b>\nИспользование: /antiraid on/off", parse_mode="HTML")
-    
-    set_setting("antiraid", args_text)
-    status = "включена ✅" if args_text == "on" else "выключена ❌"
-    await message.reply(f"🛡️ Антирейд защита {status}", parse_mode="HTML")
-    await log_action("ANTIRAID", message.from_user.full_name or str(message.from_user.id), args_text.upper(), "", "")
-
-
-# ─────────────────────────────────────────────
-# /antilink on/off
-# ─────────────────────────────────────────────
-
-@dp.message(Command("antilink"))
-async def cmd_antilink(message: Message):
-    if not is_allowed_chat(message):
-        return
-    if not is_allowed(message):
-        return
-    
-    args_text = message.text.partition(" ")[2].strip().lower()
-    if args_text not in ("on", "off"):
-        current = "включена" if get_setting("antilink", "off") == "on" else "выключена"
-        return await message.reply(f"🔗 Антиссылка сейчас <b>{current}</b>\nИспользование: /antilink on/off", parse_mode="HTML")
-    
-    set_setting("antilink", args_text)
-    status = "включена ✅" if args_text == "on" else "выключена ❌"
-    await message.reply(f"🔗 Антиссылка {status}", parse_mode="HTML")
-    await log_action("ANTILINK", message.from_user.full_name or str(message.from_user.id), args_text.upper(), "", "")
-
-
-# ─────────────────────────────────────────────
-# /scan — проверка чата на подозрительные сообщения
-# ─────────────────────────────────────────────
-
-@dp.message(Command("scan"))
-async def cmd_scan(message: Message):
-    if not is_allowed_chat(message):
-        return
-    if not is_allowed(message):
-        return
-    
-    await message.reply("🔍 <b>Начинаю сканирование чата...</b>", parse_mode="HTML")
-    
-    suspicious = []
-    spam_users = defaultdict(int)
-    
-    async for msg in bot.get_chat_history(message.chat.id, limit=200):
-        if msg.from_user and msg.from_user.is_bot:
-            continue
-        if msg.text:
-            # Проверка на ссылки
-            if LINK_PATTERN.search(msg.text) and not is_allowed(msg):
-                suspicious.append(f"🔗 Ссылка от {msg.from_user.full_name}")
-            # Проверка на длинные сообщения
-            if len(msg.text) > 500:
-                suspicious.append(f"📝 Длинное сообщение ({len(msg.text)} символов) от {msg.from_user.full_name}")
-            # Проверка на капс (более 70% заглавных)
-            caps_count = sum(1 for c in msg.text if c.isupper())
-            if caps_count > len(msg.text) * 0.7 and len(msg.text) > 20:
-                suspicious.append(f"🔊 Капс от {msg.from_user.full_name}")
-            # Считаем сообщения для выявления спамеров
-            spam_users[msg.from_user.id] += 1
-    
-    # Выявляем потенциальных спамеров
-    for uid, count in spam_users.items():
-        if count > 30:
-            suspicious.append(f"⚠️ Потенциальный спамер (ID: {uid}) — {count} сообщений")
-    
-    if suspicious:
-        text = "🔍 <b>Найдены подозрительные моменты:</b>\n\n" + "\n".join(suspicious[:15])
-        await message.reply(text, parse_mode="HTML")
-    else:
-        await message.reply("✅ <b>Чат чист! Подозрительных сообщений не найдено.</b>", parse_mode="HTML")
-    
-    await log_action("SCAN", message.from_user.full_name or str(message.from_user.id), "чат проверен", "", "")
-
-
-# ─────────────────────────────────────────────
-# /logs — последние действия бота
-# ─────────────────────────────────────────────
-
-@dp.message(Command("logs"))
-async def cmd_logs(message: Message):
-    if not is_allowed_chat(message):
-        return
-    if not is_allowed(message):
-        return
-    
-    # Последние действия из истории наказаний
-    conn = sqlite3.connect("moderation.db")
-    rows = conn.execute(
-        "SELECT action, username, reason, moderator_name, created_at FROM punishments_history ORDER BY created_at DESC LIMIT 20"
-    ).fetchall()
-    conn.close()
-    
-    if not rows:
-        return await message.reply("📜 История действий бота пуста.")
-    
-    lines = ["📜 <b>Последние действия бота:</b>\n"]
-    for action, username, reason, moderator, created_at in rows:
-        dt = datetime.fromtimestamp(created_at).strftime("%d.%m %H:%M")
-        lines.append(f"• <b>{action.upper()}</b> | {dt}\n  👤 {format_display(username)}\n  👮 {moderator}\n  📌 {reason}")
-    
-    await message.reply("\n\n".join(lines[:10]), parse_mode="HTML")
 
 
 # ─────────────────────────────────────────────
@@ -1768,6 +1845,7 @@ async def cmd_ban(message: Message):
     user_id = None
     name = None
     reason = "не указана"
+    admin_name = admin_display(message)
 
     if message.reply_to_message:
         parts = args_text.split(maxsplit=1)
@@ -1805,19 +1883,17 @@ async def cmd_ban(message: Message):
         if perm:
             await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id)
             db_add_ban(user_id, name, None, reason)
-            add_punishment_history(user_id, name, "ban", reason, "навсегда", message.from_user.id, message.from_user.full_name or str(message.from_user.id))
+            db_add_log("ban", message.from_user.id if message.from_user else 0, admin_name, user_id, name, reason)
             await message.reply(f"🔨 <b>{format_display(name)}</b> забанен <b>навсегда</b>\n📌 Причина: {reason}", parse_mode="HTML")
             await notify_user(user_id, f"🔨 Тебя забанили в чате <b>{chat_name}</b> <b>навсегда</b>\n📌 Причина: {reason}")
-            await log_action("BAN", message.from_user.full_name or str(message.from_user.id), format_display(name), reason, "навсегда")
         else:
             until = message.date + timedelta(seconds=seconds)
             await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, until_date=until)
             db_add_ban(user_id, name, int(until.timestamp()), reason)
+            db_add_log("ban", message.from_user.id if message.from_user else 0, admin_name, user_id, name, reason)
             duration_text = format_duration(seconds)
-            add_punishment_history(user_id, name, "ban", reason, duration_text, message.from_user.id, message.from_user.full_name or str(message.from_user.id))
             await message.reply(f"🔨 <b>{format_display(name)}</b> забанен на <b>{duration_text}</b>\n📌 Причина: {reason}", parse_mode="HTML")
             await notify_user(user_id, f"🔨 Тебя забанили в чате <b>{chat_name}</b> на <b>{duration_text}</b>\n📌 Причина: {reason}")
-            await log_action("BAN", message.from_user.full_name or str(message.from_user.id), format_display(name), reason, duration_text)
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
 
@@ -1837,6 +1913,7 @@ async def cmd_unmute(message: Message):
     user_id, name = await resolve_target(message.chat.id, target, message.reply_to_message)
     if not user_id:
         return await message.reply("❌ Пользователь не найден.")
+    admin_name = admin_display(message)
     try:
         await bot.restrict_chat_member(
             chat_id=message.chat.id,
@@ -1845,10 +1922,10 @@ async def cmd_unmute(message: Message):
             use_independent_chat_permissions=False,
         )
         db_remove_mute(user_id)
+        db_add_log("unmute", message.from_user.id if message.from_user else 0, admin_name, user_id, name, "—")
         await message.reply(f"🔊 <b>{format_display(name)}</b> размьючен.", parse_mode="HTML")
         chat_name = message.chat.title or str(message.chat.id)
         await notify_user(user_id, f"🔊 Тебя размьютили в чате <b>{chat_name}</b>!")
-        await log_action("UNMUTE", message.from_user.full_name or str(message.from_user.id), format_display(name), "", "")
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
 
@@ -1868,13 +1945,14 @@ async def cmd_unban(message: Message):
     user_id, name = await resolve_target(message.chat.id, target, message.reply_to_message)
     if not user_id:
         return await message.reply("❌ Пользователь не найден.")
+    admin_name = admin_display(message)
     try:
         await bot.unban_chat_member(chat_id=message.chat.id, user_id=user_id, only_if_banned=True)
         db_remove_ban(user_id)
+        db_add_log("unban", message.from_user.id if message.from_user else 0, admin_name, user_id, name, "—")
         await message.reply(f"✅ <b>{format_display(name)}</b> разбанен.", parse_mode="HTML")
         chat_name = message.chat.title or str(message.chat.id)
         await notify_user(user_id, f"✅ Тебя разбанили в чате <b>{chat_name}</b>!")
-        await log_action("UNBAN", message.from_user.full_name or str(message.from_user.id), format_display(name), "", "")
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
 
@@ -1890,6 +1968,7 @@ async def cmd_kick(message: Message):
     if not is_allowed(message):
         return
     args_text = message.text.partition(" ")[2].strip()
+    admin_name = admin_display(message)
     if message.reply_to_message:
         user_id, name = await resolve_target(message.chat.id, None, message.reply_to_message)
         reason = args_text or "не указана"
@@ -1907,9 +1986,8 @@ async def cmd_kick(message: Message):
         await notify_user(user_id, f"👢 Тебя кикнули из чата <b>{chat_name}</b>\n📌 Причина: {reason}")
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id)
         await bot.unban_chat_member(chat_id=message.chat.id, user_id=user_id, only_if_banned=True)
-        add_punishment_history(user_id, name, "kick", reason, "", message.from_user.id, message.from_user.full_name or str(message.from_user.id))
+        db_add_log("kick", message.from_user.id if message.from_user else 0, admin_name, user_id, name, reason)
         await message.reply(f"👢 <b>{format_display(name)}</b> кикнут.\n📌 Причина: {reason}", parse_mode="HTML")
-        await log_action("KICK", message.from_user.full_name or str(message.from_user.id), format_display(name), reason, "")
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
 
@@ -1925,6 +2003,7 @@ async def cmd_warn(message: Message):
     if not is_allowed(message):
         return
     args_text = message.text.partition(" ")[2].strip()
+    admin_name = admin_display(message)
     if message.reply_to_message:
         u = message.reply_to_message.from_user
         if not u:
@@ -1942,15 +2021,14 @@ async def cmd_warn(message: Message):
     if not user_id:
         return await message.reply("❌ Пользователь не найден.")
     db_add_warn(user_id, name, reason)
+    db_add_log("warn", message.from_user.id if message.from_user else 0, admin_name, user_id, name, reason)
     warns = db_get_warns(user_id)
-    add_punishment_history(user_id, name, "warn", reason, "", message.from_user.id, message.from_user.full_name or str(message.from_user.id))
     await message.reply(
         f"⚠️ <b>{format_display(name)}</b>, ты получил предупреждение! (всего: {len(warns)})\n📌 Причина: {reason}",
         parse_mode="HTML",
     )
     chat_name = message.chat.title or str(message.chat.id)
     await notify_user(user_id, f"⚠️ Ты получил предупреждение в чате <b>{chat_name}</b>\n📌 Причина: {reason}\nВсего варнов: {len(warns)}")
-    await log_action("WARN", message.from_user.full_name or str(message.from_user.id), format_display(name), reason, f"всего: {len(warns)}")
 
 
 # ─────────────────────────────────────────────
@@ -1986,11 +2064,9 @@ async def cmd_ro(message: Message):
     try:
         await bot.restrict_chat_member(**kwargs)
         duration_text = f"на {format_duration(seconds)}" if seconds else "навсегда"
-        add_punishment_history(user_id, name, "readonly", reason, format_duration(seconds) if seconds else "навсегда", message.from_user.id, message.from_user.full_name or str(message.from_user.id))
         await message.reply(f"🚫 <b>{format_display(name)}</b> переведён в режим чтения {duration_text}\n📌 Причина: {reason}", parse_mode="HTML")
         chat_name = message.chat.title or str(message.chat.id)
         await notify_user(user_id, f"🚫 Тебя перевели в режим чтения в чате <b>{chat_name}</b> {duration_text}\n📌 Причина: {reason}")
-        await log_action("READONLY", message.from_user.full_name or str(message.from_user.id), format_display(name), reason, duration_text)
     except Exception as e:
         await message.reply(f"❌ Ошибка: {e}")
 
@@ -2120,62 +2196,10 @@ async def cmd_unwarn(message: Message):
         parse_mode="HTML",
     )
     await notify_user(user_id, f"✅ С тебя сняли варн №{warn_num}\n📌 Был за: {reason}\nОсталось варнов: {remaining}")
-    await log_action("UNWARN", message.from_user.full_name or str(message.from_user.id), format_display(name), reason, f"снят варн #{warn_num}")
 
 
 # ─────────────────────────────────────────────
-# /roll — случайное число
-# ─────────────────────────────────────────────
-
-@dp.message(Command("roll"))
-async def cmd_roll(message: Message):
-    if not is_allowed_chat(message):
-        return
-    
-    args = message.text.partition(" ")[2].strip()
-    if args:
-        try:
-            max_num = int(args)
-            if max_num < 2:
-                max_num = 100
-        except ValueError:
-            max_num = 100
-    else:
-        max_num = 100
-    
-    result = random.randint(1, max_num)
-    name = message.from_user.full_name if message.from_user else "Кто-то"
-    await message.reply(f"🎲 <b>{name}</b> выбросил число <b>{result}</b> из {max_num}!", parse_mode="HTML")
-
-
-# ─────────────────────────────────────────────
-# /joke — случайная шутка
-# ─────────────────────────────────────────────
-
-JOKES = [
-    "Почему программисты путают Хэллоуин и Рождество? Потому что 31 Oct = 25 Dec!",
-    "Сколько программистов нужно, чтобы заменить лампочку? Ни одного — это аппаратная проблема!",
-    "Что говорит один бит другому? — Ты меня дополняешь!",
-    "Почему разработчики ненавидят открытые офисы? Потому что там слишком много тегов",
-    "Что такое идеальный код? Тот, который не написан",
-    "Почему админ носит тёмные очки? Чтобы солнце не мешало видеть синий экран смерти",
-    "Как отличить хоббита от программиста? Хоббит с радостью идёт в горы, а программист — только в горы с ноутбуком",
-    "Что такое 8 бит? Это 1 байт удачи!",
-    "Почему программисты всегда холодные? Потому что на улице +0, а в комнате +10 (системы счисления)",
-    "Как программист ловит рыбу? Он экземплярит класс Удочка и вызывает метод catch()",
-]
-
-@dp.message(Command("joke"))
-async def cmd_joke(message: Message):
-    if not is_allowed_chat(message):
-        return
-    
-    joke = random.choice(JOKES)
-    await message.reply(f"😂 {joke}", parse_mode="HTML")
-
-
-# ─────────────────────────────────────────────
-# Личка — анонимные сообщения
+# Личка — анонимные сообщения (должен быть последним!)
 # ─────────────────────────────────────────────
 
 @dp.message(F.chat.type == "private")
